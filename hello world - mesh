@@ -1,0 +1,110 @@
+#include "painlessMesh.h"
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME680.h>
+#include <MPU6050_tockn.h>
+#include <U8g2lib.h>
+
+#define   MESH_PREFIX     "whateverYouLike"
+#define   MESH_PASSWORD   "somethingSneaky"
+#define   MESH_PORT       5555
+
+#define SDA_PIN 6
+#define SCL_PIN 7
+
+Scheduler userScheduler;  
+painlessMesh  mesh;
+
+Adafruit_BME680 bme;      
+MPU6050 mpu(Wire);       
+
+void sendMessage(); 
+Task taskSendMessage(TASK_SECOND * 1, TASK_FOREVER, &sendMessage);
+
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+void sendMessage() {
+  float temperature, humidity, pressure, gasResistance;
+  if (bme.performReading()) {
+    temperature = bme.temperature;
+    humidity = bme.humidity;
+    pressure = bme.pressure / 100.0;  
+    gasResistance = bme.gas_resistance / 1000.0; 
+  } else {
+    temperature = humidity = pressure = gasResistance = 0.0;
+  }
+
+  mpu.update();
+  float ax = mpu.getAccX();
+  float ay = mpu.getAccY();
+  float az = mpu.getAccZ();
+  float gx = mpu.getGyroX();
+  float gy = mpu.getGyroY();
+  float gz = mpu.getGyroZ();
+
+  // Prepare the message to send
+  String msg = "Node1 " + String(mesh.getNodeId()) + " BME680: T=" + String(temperature) + "C H=" + String(humidity) + "% P=" + String(pressure) + " hPa Gas=" + String(gasResistance) + " KOhms ";
+  msg += "MPU6050: Acc=(" + String(ax) + "," + String(ay) + "," + String(az) + ") Gyro=(" + String(gx) + "," + String(gy) + "," + String(gz) + ")";
+
+  // Send the message to the mesh network
+  mesh.sendBroadcast(msg);
+
+  // Set the next send interval randomly between 1 and 5 seconds
+  taskSendMessage.setInterval(random(TASK_SECOND * 1, TASK_SECOND * 5));
+}
+
+// Needed for painlessMesh library
+void receivedCallback(uint32_t from, String &msg) {
+  Serial.printf("Received from %u: %s\n", from, msg.c_str());
+}
+
+void newConnectionCallback(uint32_t nodeId) {
+  Serial.printf("--> New Connection, nodeId = %u\n", nodeId);
+}
+
+void changedConnectionCallback() {
+  Serial.printf("Changed connections\n");
+}
+
+void nodeTimeAdjustedCallback(int32_t offset) {
+  Serial.printf("Adjusted time %u. Offset = %d\n", mesh.getNodeTime(), offset);
+}
+
+void UpdateScreen() {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.drawStr(20, 10, "Hello World");
+  u8g2.sendBuffer();  // Send to the display
+}
+
+void setup() {
+  Serial.begin(921600);
+
+  // Initialize I2C with custom SDA and SCL pins
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  // Initialize BME680
+  if (!bme.begin()) {
+    Serial.println("Could not find a valid BME680 sensor, check wiring!");
+    while (1);
+  }
+
+  // Initialize MPU6050
+  mpu.begin();
+
+  mesh.setDebugMsgTypes(ERROR | STARTUP);  // Set before init to see startup messages
+
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
+  mesh.onReceive(&receivedCallback);
+  mesh.onNewConnection(&newConnectionCallback);
+  mesh.onChangedConnections(&changedConnectionCallback);
+  mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
+
+  userScheduler.addTask(taskSendMessage);
+  taskSendMessage.enable();
+}
+
+void loop() {
+  mesh.update();  // Keep the mesh network running
+  UpdateScreen();
+}
